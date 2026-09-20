@@ -391,9 +391,37 @@ static FAST_CODE_NOINLINE void checkForYawSpin(timeUs_t currentTimeUs)
 }
 #endif // USE_YAW_SPIN_RECOVERY
 
+// True while a sensor has gone this long without producing a sample that differs from the one
+// before it, which is how a sensor that has stopped delivering data presents itself: the read
+// either fails, or returns the previous transfer's data unchanged.
+static FAST_CODE bool gyroSensorIsStale(const gyroSensor_t *gyroSensor)
+{
+    return gyro.staleSampleLimit && (gyroSensor->staleSampleCount >= gyro.staleSampleLimit);
+}
+
+static FAST_CODE void gyroUpdateStaleSampleCount(gyroSensor_t *gyroSensor, bool dataRead)
+{
+    const int16_t *raw = gyroSensor->gyroDev.gyroADCRaw;
+
+    if (dataRead && ((raw[X] != gyroSensor->lastNewRaw[X])
+                     || (raw[Y] != gyroSensor->lastNewRaw[Y])
+                     || (raw[Z] != gyroSensor->lastNewRaw[Z]))) {
+        gyroSensor->lastNewRaw[X] = raw[X];
+        gyroSensor->lastNewRaw[Y] = raw[Y];
+        gyroSensor->lastNewRaw[Z] = raw[Z];
+        gyroSensor->staleSampleCount = 0;
+    } else if (gyroSensor->staleSampleCount < gyro.staleSampleLimit) {
+        gyroSensor->staleSampleCount++;
+    }
+}
+
 static FAST_CODE void gyroUpdateSensor(gyroSensor_t *gyroSensor)
 {
-    if (!gyroSensor->gyroDev.readFn(&gyroSensor->gyroDev)) {
+    const bool dataRead = gyroSensor->gyroDev.readFn(&gyroSensor->gyroDev);
+
+    gyroUpdateStaleSampleCount(gyroSensor, dataRead);
+
+    if (!dataRead) {
         return;
     }
     gyroSensor->gyroDev.dataReady = false;
@@ -428,10 +456,19 @@ FAST_CODE void gyroUpdate(void)
 
     float active = 0;
 
+    uint8_t staleBitmask = 0;
+
     for (int i = 0; i < GYRO_COUNT; i++) {
         if (gyro.gyroEnabledBitmask & GYRO_MASK(i)) {
             gyroUpdateSensor(&gyro.gyroSensor[i]);
             if (isGyroSensorCalibrationComplete(&gyro.gyroSensor[i])) {
+                if (gyroSensorIsStale(&gyro.gyroSensor[i])) {
+                    // Keep a sensor that has stopped delivering data out of the fusion rather than
+                    // averaging its frozen sample into the fused signal. With no sensor left to fuse
+                    // the fused value holds, which is what a lone stalled sensor gives in any case.
+                    staleBitmask |= GYRO_MASK(i);
+                    continue;
+                }
                 adcSum[X] += gyro.gyroSensor[i].gyroDev.gyroADC.x * gyro.gyroSensor[i].gyroDev.scale;
                 adcSum[Y] += gyro.gyroSensor[i].gyroDev.gyroADC.y * gyro.gyroSensor[i].gyroDev.scale;
                 adcSum[Z] += gyro.gyroSensor[i].gyroDev.gyroADC.z * gyro.gyroSensor[i].gyroDev.scale;
@@ -439,6 +476,8 @@ FAST_CODE void gyroUpdate(void)
             }
         }
     }
+
+    DEBUG_SET(DEBUG_GYRO_RAW, 3, staleBitmask);  //!< Gyros Not Delivering Data [flags:Gyro 1|Gyro 2|Gyro 3|Gyro 4]
 
     if (active != 0) {
         gyro.gyroADC[X] = adcSum[X] / active;

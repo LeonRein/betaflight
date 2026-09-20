@@ -465,6 +465,9 @@ serial_feature_map_unittest_DEFINES := \
 		USE_TELEMETRY_MAVLINK= \
 		USE_TELEMETRY_IBUS=
 
+sensor_gyro_unittest_DEFINES := \
+		GYRO_COUNT=2 \
+
 sensor_gyro_unittest_SRC := \
 		$(USER_DIR)/sensors/gyro.c \
 		$(USER_DIR)/sensors/gyro_init.c \

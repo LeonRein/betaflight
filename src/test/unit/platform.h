@@ -100,7 +100,9 @@ typedef struct
 
 #define SPIDEV_COUNT 0
 #define I2CDEV_COUNT 0
+#ifndef GYRO_COUNT  // a test that exercises gyro fusion overrides this from the Makefile
 #define GYRO_COUNT 1
+#endif
 
 #define WS2811_DMA_TC_FLAG (void *)1
 #define WS2811_DMA_HANDLER_IDENTIFER 0

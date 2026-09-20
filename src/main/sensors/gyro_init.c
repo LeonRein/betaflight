@@ -796,9 +796,11 @@ void gyroSetTargetLooptime(uint8_t pidDenom)
     if (gyro.sampleRateHz) {
         gyro.sampleLooptime = 1e6f / gyro.sampleRateHz;
         gyro.targetLooptime = activePidLoopDenom * 1e6f / gyro.sampleRateHz;
+        gyro.staleSampleLimit = MAX((uint32_t)1, ((uint32_t)GYRO_STALE_DATA_TIMEOUT_US * gyro.sampleRateHz) / 1000000);
     } else {
         gyro.sampleLooptime = 0;
         gyro.targetLooptime = 0;
+        gyro.staleSampleLimit = 0;
     }
 }
 

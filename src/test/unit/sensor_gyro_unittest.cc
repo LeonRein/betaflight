@@ -152,6 +152,119 @@ TEST(SensorGyro, Update)
     EXPECT_NEAR(90 * gyroDevPtr->scale, gyro.gyroADC[Z], 1e-3);
 }
 
+// A sensor that has stopped delivering data keeps returning the sample it last read: its reads
+// either fail, or hand back the previous transfer's buffer unchanged. Fusing that frozen sample
+// biases the fused gyro signal by a constant, which flies as a constant rate drift.
+static int16_t stalledGyroRaw[XYZ_AXIS_COUNT];
+
+static bool stalledGyroRead(gyroDev_t *gyroDev)
+{
+    gyroDev->gyroADCRaw[X] = stalledGyroRaw[X];
+    gyroDev->gyroADCRaw[Y] = stalledGyroRaw[Y];
+    gyroDev->gyroADCRaw[Z] = stalledGyroRaw[Z];
+    return true;
+}
+
+static void stalledGyroSet(int16_t x, int16_t y, int16_t z)
+{
+    stalledGyroRaw[X] = x;
+    stalledGyroRaw[Y] = y;
+    stalledGyroRaw[Z] = z;
+}
+
+// Brings both sensors up, zero calibrated, both delivering data, and returns with the fusion
+// holding the sample last given to each of them.
+static void initFusedGyroPair(void)
+{
+    pgResetAll();
+    // turn off filters
+    gyroConfigMutable()->gyro_lpf1_static_hz = 0;
+    gyroConfigMutable()->gyro_lpf2_static_hz = 0;
+    gyroConfigMutable()->gyro_soft_notch_hz_1 = 0;
+    gyroConfigMutable()->gyro_soft_notch_hz_2 = 0;
+    gyroConfigMutable()->gyro_enabled_bitmask = GYRO_MASK(0) | GYRO_MASK(1);
+    gyroInit();
+    gyroSetTargetLooptime(1);
+    ASSERT_EQ(GYRO_MASK(0) | GYRO_MASK(1), gyro.gyroEnabledBitmask);
+    ASSERT_GT(gyro.staleSampleLimit, 0u);
+
+    gyro.gyroSensor[0].gyroDev.readFn = virtualGyroRead;
+    gyro.gyroSensor[1].gyroDev.readFn = stalledGyroRead;
+
+    gyroStartCalibration(false);
+    while (!gyroIsCalibrationComplete()) {
+        virtualGyroSet(&gyro.gyroSensor[0].gyroDev, 0, 0, 0);
+        stalledGyroSet(0, 0, 0);
+        gyroUpdate();
+    }
+    // both sensors deliver a new sample, so both are fused
+    virtualGyroSet(&gyro.gyroSensor[0].gyroDev, 100, 0, 0);
+    stalledGyroSet(100, 0, 0);
+    gyroUpdate();
+    EXPECT_NEAR(100 * gyro.gyroSensor[0].gyroDev.scale, gyro.gyroADC[X], 1e-3);
+}
+
+// Runs sensor 1 out of samples while sensor 0 keeps delivering, and returns with sensor 1 just
+// about to be written off. Sensor 0 alternates so that it stays a sensor that delivers data.
+static void runSensor1ToTheEdgeOfStale(void)
+{
+    for (uint32_t i = 1; i < gyro.staleSampleLimit; i++) {
+        const int16_t moving = (i & 1) ? 300 : 320;
+        virtualGyroSet(&gyro.gyroSensor[0].gyroDev, moving, 0, 0);
+        gyroUpdate();
+        // until the sensor is written off its frozen sample still offsets the fused signal
+        EXPECT_NEAR(0.5f * (moving + 100) * gyro.gyroSensor[0].gyroDev.scale, gyro.gyroADC[X], 1e-3);
+    }
+}
+
+TEST(SensorGyro, FusionDropsSensorThatStoppedDeliveringData)
+{
+    initFusedGyroPair();
+    runSensor1ToTheEdgeOfStale();
+
+    // one more sample without new data from sensor 1 writes it off, so the fused signal follows
+    // the sensor that is still delivering data instead of carrying half of the frozen sample
+    virtualGyroSet(&gyro.gyroSensor[0].gyroDev, 300, 0, 0);
+    gyroUpdate();
+    EXPECT_NEAR(300 * gyro.gyroSensor[0].gyroDev.scale, gyro.gyroADC[X], 1e-3);
+
+    virtualGyroSet(&gyro.gyroSensor[0].gyroDev, 400, 0, 0);
+    gyroUpdate();
+    EXPECT_NEAR(400 * gyro.gyroSensor[0].gyroDev.scale, gyro.gyroADC[X], 1e-3);
+}
+
+TEST(SensorGyro, DroppedSensorRejoinsFusionOnNewData)
+{
+    initFusedGyroPair();
+    runSensor1ToTheEdgeOfStale();
+
+    virtualGyroSet(&gyro.gyroSensor[0].gyroDev, 300, 0, 0);
+    gyroUpdate();
+    EXPECT_NEAR(300 * gyro.gyroSensor[0].gyroDev.scale, gyro.gyroADC[X], 1e-3);
+
+    // sensor 1 delivers data again, and is fused again from that sample on
+    stalledGyroSet(500, 0, 0);
+    virtualGyroSet(&gyro.gyroSensor[0].gyroDev, 320, 0, 0);
+    gyroUpdate();
+    EXPECT_NEAR(410 * gyro.gyroSensor[0].gyroDev.scale, gyro.gyroADC[X], 1e-3);
+}
+
+TEST(SensorGyro, LoneSensorThatStoppedDeliveringDataHoldsItsValue)
+{
+    initFusedGyroPair();
+    gyro.gyroEnabledBitmask = GYRO_MASK(1);
+
+    stalledGyroSet(100, 0, 0);
+    gyroUpdate();
+    EXPECT_NEAR(100 * gyro.gyroSensor[1].gyroDev.scale, gyro.gyroADC[X], 1e-3);
+
+    // nothing to fall back to, so the last value holds rather than dropping to zero
+    for (uint32_t i = 0; i <= gyro.staleSampleLimit + 1; i++) {
+        gyroUpdate();
+    }
+    EXPECT_NEAR(100 * gyro.gyroSensor[1].gyroDev.scale, gyro.gyroADC[X], 1e-3);
+}
+
 // STUBS
 
 extern "C" {

@@ -53,6 +53,14 @@
 
 #define GYRO_MASK(x) BIT(x)
 
+// A gyro that stops updating - a read that fails, or a stalled SPI/DMA transfer that leaves the
+// previous transfer's data in the receive buffer - keeps publishing its last sample. Averaging a
+// frozen sample into the fused gyro signal shifts that signal by a constant offset, which flies
+// as a constant rate drift on the affected axes that neither disarming nor re-arming clears. A
+// sensor that has repeated the same sample for this long is treated as no longer delivering data
+// and left out of the fusion; it rejoins as soon as it delivers a new sample.
+#define GYRO_STALE_DATA_TIMEOUT_US 20000
+
 typedef union gyroLowpassFilter_u {
     pt1Filter_t pt1FilterState;
     svfLowpassFilter_t svfLowpassFilterState;
@@ -69,6 +77,8 @@ typedef struct gyroCalibration_s {
 typedef struct gyroSensor_s {
     gyroDev_t gyroDev;
     gyroCalibration_t calibration;
+    int16_t lastNewRaw[XYZ_AXIS_COUNT]; // the most recent sample that differed from its predecessor
+    uint32_t staleSampleCount;          // consecutive updates that brought no new data from this sensor
 } gyroSensor_t;
 
 typedef struct gyro_s {
@@ -102,6 +112,7 @@ typedef struct gyro_s {
     svfNotchFilter_t notchFilter2[XYZ_AXIS_COUNT];
 
     uint16_t accSampleRateHz;
+    uint32_t staleSampleLimit;         // unchanged samples that mark a sensor stale, 0 while unknown
     uint8_t gyroEnabledBitmask;
     uint8_t gyroDebugMode;
     bool gyroHasOverflowProtection;
